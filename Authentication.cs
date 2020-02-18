@@ -12,71 +12,104 @@ using lu.Models;
 using lu.Context;
 using Microsoft.EntityFrameworkCore;
 using lu.Helpers;
+using lu.Interfaces;
 
 namespace lu
 {
     public class Authentication
     {
-        private AuthContext _context;
+        private IAuthenticationService _authService;
 
-        public Authentication(AuthContext context)
+        public Authentication(IAuthenticationService authService)
         {
-            _context = context;
+            _authService = authService;
         }
 
         [FunctionName("authenticate")]
         public async Task<IActionResult> Authenticate(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "Authenticate")] HttpRequest req,
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "authenticate")] HttpRequest req,
             ILogger log)
         {
-            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            var data = JsonConvert.DeserializeObject<User>(requestBody);
+            var data = await ReadRequestBodyAsync<User>(req);
 
-            if (data == null)
+            if (data == null
+                || data.Email?.Length < 1
+                || data.Password?.Length < 1)
             {
-                return new BadRequestObjectResult("No data was provided");
+                return new BadRequestObjectResult("Neccessary logininformation was not provided");
             }
 
-            var user = await _context.Users
-                .FirstOrDefaultAsync(user => user.Email == data.Email);
+            Jwt token;
+            try
+            {
+                token = await _authService.AuthenticateAsync(data);
+            }
+            catch (Exception ex)
+            {
+                return new BadRequestObjectResult(ex.Message);
+            }
 
-            var result = EncryptionHelper.ValidatePassword(user.Password, data.Password);
-            user.Password = null;
-            data = null;
-
-            return result
-                ? (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(user))
-                : new BadRequestObjectResult("Could not find user.");
+            return token != null
+                ? (ActionResult)new OkObjectResult(JsonConvert.SerializeObject(token))
+                : new BadRequestObjectResult("Something went wrong during authentication. Please try again.");
         }
 
         [FunctionName("register")]
         public async Task<IActionResult> Register(
-            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "Register")] HttpRequest req,
+            [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "register")] HttpRequest req,
             ILogger log)
         {
-            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
-            var data = JsonConvert.DeserializeObject<User>(requestBody);
-
-            var userExists = await _context.Users.FirstOrDefaultAsync(user => user.Email == data.Email);
+            var data = await ReadRequestBodyAsync<User>(req);
 
             if (data == null
                 || data.Email.Length < 1
-                || data.Password.Length < 1)
+                || data.Password.Length < 1
+                || data.FirstName.Length < 1
+                || data.LastName.Length < 1)
             {
-                return new BadRequestObjectResult("No data was provided");
-            }
-            else if (userExists != null)
-            {
-                return new BadRequestObjectResult("User already exists");
+                return new BadRequestObjectResult("Neccessary information was not provided");
             }
 
-            var newUser = data;
-            newUser.Password = EncryptionHelper.Hash(data.Password);
+            bool success;
 
-            var result = await _context.Users.AddAsync(newUser);
-            await _context.SaveChangesAsync();
+            try
+            {
+                success = await _authService.CreateUserAsync(data);
+            }
+            catch (Exception ex)
+            {
+                return new BadRequestObjectResult(ex.Message);
+            }
 
-            return new OkObjectResult("User created");
+            return success
+                    ? (ActionResult)new OkObjectResult("User created")
+                    : new BadRequestObjectResult("User could not be saved. Please try again");
+        }
+
+        [FunctionName("validate")]
+        public async Task<IActionResult> Validate(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "validate")] HttpRequest req,
+            ILogger log)
+        {
+            var data = await ReadRequestBodyAsync<Jwt>(req);
+
+            bool success;
+            try
+            {
+                success = _authService.ValidateJwtToken(data.Token);
+            }
+            catch (Exception ex)
+            {
+                return new BadRequestObjectResult("Error. Could not validate token");
+            }
+
+            return new OkObjectResult(success);
+        }
+
+        private async Task<T> ReadRequestBodyAsync<T>(HttpRequest req)
+        {
+            string requestBody = await new StreamReader(req.Body).ReadToEndAsync();
+            return JsonConvert.DeserializeObject<T>(requestBody);
         }
     }
 }
